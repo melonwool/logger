@@ -15,19 +15,47 @@ type Logger struct {
 	ZapSugar  *zap.SugaredLogger
 	FileName  string
 	File      io.WriteCloser
+	Option
 }
 
+type (
+	Option struct {
+		DateFormat string
+		ZapOptions []zap.Option
+	}
+	OptFunc func(option *Logger)
+)
+
 // NewLogger 初始化一个Logger 包含了zapLogger 和 zapSugar
-func NewLogger(fileName string) (*Logger, error) {
+func NewLogger(fileName string, optFunc ...OptFunc) (*Logger, error) {
 	logger := &Logger{
 		FileName: fileName,
 	}
+	for _, fn := range optFunc {
+		fn(logger)
+	}
 	core, err := logger.core()
-	logger.ZapLogger = zap.New(core, zap.AddCaller())
+	logger.newZapLogger(core)
 	logger.ZapSugar = logger.ZapLogger.Sugar()
 	// 启动一个协程监听信号来重新打开文件写入日志
 	go logger.listen()
 	return logger, err
+}
+
+func (logger *Logger) newZapLogger(core zapcore.Core) {
+	logger.ZapLogger = zap.New(core, logger.ZapOptions...)
+}
+
+func DateFormat(format string) OptFunc {
+	return func(logger *Logger) {
+		logger.DateFormat = format
+	}
+}
+
+func ZapOptions(option ...zap.Option) OptFunc {
+	return func(logger *Logger) {
+		logger.ZapOptions = option
+	}
 }
 
 // listen 监听SIGUSR1 信号,重新打开文件写入,用来日志切割使用
@@ -39,7 +67,7 @@ func (logger *Logger) listen() {
 		if err != nil {
 			log.Println(err)
 		}
-		logger.ZapLogger = zap.New(core)
+		logger.newZapLogger(core)
 		logger.ZapSugar = logger.ZapLogger.Sugar()
 	}
 }
@@ -48,7 +76,11 @@ func (logger *Logger) listen() {
 func (logger *Logger) core() (zapcore.Core, error) {
 	var err error
 	var core zapcore.Core
-	encoder := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
+	encoderConfig := zap.NewProductionEncoderConfig()
+	if logger.DateFormat != "" {
+		encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(logger.DateFormat)
+	}
+	encoder := zapcore.NewJSONEncoder(encoderConfig)
 	logger.File, err = os.OpenFile(logger.FileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0755)
 	if err != nil {
 		return core, err

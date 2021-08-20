@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 type Logger struct {
@@ -20,8 +21,10 @@ type Logger struct {
 
 type (
 	Option struct {
-		DateFormat string
-		ZapOptions []zap.Option
+		DateFormat   string
+		SignalListen bool
+		TickerListen *time.Ticker
+		ZapOptions   []zap.Option
 	}
 	OptFunc func(option *Logger)
 )
@@ -37,8 +40,13 @@ func NewLogger(fileName string, optFunc ...OptFunc) (*Logger, error) {
 	core, err := logger.core()
 	logger.newZapLogger(core)
 	logger.ZapSugar = logger.ZapLogger.Sugar()
-	// 启动一个协程监听信号来重新打开文件写入日志
-	go logger.listen()
+	if logger.SignalListen {
+		// 启动一个协程监听信号来重新打开文件写入日志
+		go logger.listenSignal()
+	}
+	if logger.TickerListen != nil {
+		go logger.listenTicker()
+	}
 	return logger, err
 }
 
@@ -52,24 +60,41 @@ func DateFormat(format string) OptFunc {
 	}
 }
 
+func SignalListen() OptFunc {
+	return func(logger *Logger) {
+		logger.SignalListen = true
+	}
+}
+
+func TickerListen(ticker *time.Ticker) OptFunc {
+	return func(logger *Logger) {
+		logger.TickerListen = ticker
+	}
+}
+
 func ZapOptions(option ...zap.Option) OptFunc {
 	return func(logger *Logger) {
 		logger.ZapOptions = option
 	}
 }
 
-// listen 监听SIGUSR1 信号,重新打开文件写入,用来日志切割使用
-func (logger *Logger) listen() {
+// listenSignal 监听SIGUSR1 信号,重新打开文件写入,用来日志切割使用
+func (logger *Logger) listenSignal() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGUSR1)
 	for range c {
-		core, err := logger.core()
-		if err != nil {
-			log.Println(err)
-		}
-		logger.newZapLogger(core)
-		logger.ZapSugar = logger.ZapLogger.Sugar()
+		logger.reload()
 	}
+}
+
+// reload 重新载入Logger 和 Sugar
+func (logger *Logger) reload() {
+	core, err := logger.core()
+	if err != nil {
+		log.Println(err)
+	}
+	logger.newZapLogger(core)
+	logger.ZapSugar = logger.ZapLogger.Sugar()
 }
 
 // core 获取 zapcore.Core
@@ -87,4 +112,13 @@ func (logger *Logger) core() (zapcore.Core, error) {
 	}
 	core = zapcore.NewCore(encoder, zapcore.AddSync(logger.File), zapcore.InfoLevel)
 	return core, err
+}
+
+func (logger *Logger) listenTicker() {
+	for range logger.TickerListen.C {
+		_, err := os.Stat(logger.FileName)
+		if err != nil && os.IsNotExist(err) {
+			logger.reload()
+		}
+	}
 }
